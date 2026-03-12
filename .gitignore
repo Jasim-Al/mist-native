@@ -1,0 +1,21 @@
+# CMake & Build Artifacts
+build/
+.cache/
+CMakeCache.txt
+CMakeFiles/
+
+# Downloaded Dependencies (FetchContent)
+_deps/
+
+# Compiled Binaries
+*.dll
+*.exe
+*.lib
+*.obj
+*.pdb
+*.exp
+
+# Visual Studio & VS Code
+.vs/
+.vscode/
+*.user
