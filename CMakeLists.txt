@@ -47,3 +47,21 @@ add_custom_command(TARGET mist_native POST_BUILD
     "${wgpu_native_SOURCE_DIR}/lib/wgpu_native.dll"
     $<TARGET_FILE_DIR:mist_native>
 )
+
+# # --- Automation: Copy DLLs to Project Root ---
+
+# if(WIN32)
+#     # Define the destination (Your Bun Project Root)
+#     set(MIST_PROJECT_ROOT "C:/Repos/mist")
+
+#     # This command runs automatically after a successful build
+#     add_custom_command(TARGET mist_native POST_BUILD
+#         COMMAND ${CMAKE_COMMAND} -E copy_if_different
+#             "$<TARGET_FILE:mist_native>"
+#             "${MIST_PROJECT_ROOT}/mist_native.dll"
+#         COMMAND ${CMAKE_COMMAND} -E copy_if_different
+#             "${CMAKE_CURRENT_BINARY_DIR}/_deps/wgpu_native-src/lib/wgpu_native.dll"
+#             "${MIST_PROJECT_ROOT}/wgpu_native.dll"
+#         COMMENT "Copying engine binaries to Bun project root..."
+#     )
+# endif()

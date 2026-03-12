@@ -40,6 +40,36 @@ static void OnDeviceRequest(WGPURequestDeviceStatus status, WGPUDevice device, W
 extern "C"
 {
 
+    MIST_API void mist_resize_window(int width, int height)
+    {
+        if (!g_device || !g_surface || width <= 0 || height <= 0)
+            return;
+
+        WGPUSurfaceConfiguration config = {};
+        config.device = g_device;
+        config.format = WGPUTextureFormat_BGRA8Unorm;
+        config.usage = WGPUTextureUsage_RenderAttachment;
+        config.width = (uint32_t)width;
+        config.height = (uint32_t)height;
+        config.presentMode = WGPUPresentMode_Fifo;
+        config.alphaMode = WGPUCompositeAlphaMode_Auto;
+        wgpuSurfaceConfigure(g_surface, &config);
+
+        if (g_depthView)
+            wgpuTextureViewRelease(g_depthView);
+
+        WGPUTextureDescriptor depthDesc = {};
+        depthDesc.usage = WGPUTextureUsage_RenderAttachment;
+        depthDesc.dimension = WGPUTextureDimension_2D;
+        depthDesc.size = {(uint32_t)width, (uint32_t)height, 1};
+        depthDesc.format = WGPUTextureFormat_Depth24Plus;
+        depthDesc.mipLevelCount = 1;
+        depthDesc.sampleCount = 1;
+        WGPUTexture depthTexture = wgpuDeviceCreateTexture(g_device, &depthDesc);
+        g_depthView = wgpuTextureCreateView(depthTexture, nullptr);
+        wgpuTextureRelease(depthTexture);
+    }
+
     MIST_API void mist_init_window(int width, int height, const char *title)
     {
         if (!glfwInit())
@@ -62,6 +92,7 @@ extern "C"
 
         WGPURequestAdapterOptions adapterOpts = {};
         adapterOpts.compatibleSurface = g_surface;
+
         WGPURequestAdapterCallbackInfo adapterCb = {};
         adapterCb.callback = OnAdapterRequest;
         wgpuInstanceRequestAdapter(g_instance, &adapterOpts, adapterCb);
@@ -73,43 +104,19 @@ extern "C"
 
         g_queue = wgpuDeviceGetQueue(g_device);
 
-        WGPUSurfaceConfiguration config = {};
-        config.device = g_device;
-        config.format = WGPUTextureFormat_BGRA8Unorm;
-        config.usage = WGPUTextureUsage_RenderAttachment;
-        config.width = width;
-        config.height = height;
-        config.presentMode = WGPUPresentMode_Fifo;
-        config.alphaMode = WGPUCompositeAlphaMode_Auto;
-        wgpuSurfaceConfigure(g_surface, &config);
+        mist_resize_window(width, height);
 
-        // Depth Texture
-        WGPUTextureDescriptor depthDesc = {};
-        depthDesc.usage = WGPUTextureUsage_RenderAttachment;
-        depthDesc.dimension = WGPUTextureDimension_2D;
-        depthDesc.size = {(uint32_t)width, (uint32_t)height, 1};
-        depthDesc.format = WGPUTextureFormat_Depth24Plus;
-        depthDesc.mipLevelCount = 1;
-        depthDesc.sampleCount = 1;
-        WGPUTexture depthTexture = wgpuDeviceCreateTexture(g_device, &depthDesc);
-        g_depthView = wgpuTextureCreateView(depthTexture, nullptr);
-
-        // Buffers
         WGPUBufferDescriptor bufDesc = {};
-        bufDesc.label = {nullptr, 0};
         bufDesc.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
-
         bufDesc.size = 16;
         g_colorBuffer = wgpuDeviceCreateBuffer(g_device, &bufDesc);
-
         bufDesc.size = 64;
         g_transformBuffer = wgpuDeviceCreateBuffer(g_device, &bufDesc);
 
-        // Shader
         const char *wgslSource = R"(
         @group(0) @binding(0) var<uniform> u_color: vec4f;
         @group(0) @binding(1) var<uniform> u_transform: mat4x4f;
-        struct VertexInput { @location(0) position: vec3f, };
+        struct VertexInput { @location(0) position: vec3f };
         @vertex fn vs_main(in: VertexInput) -> @builtin(position) vec4f {
             return u_transform * vec4f(in.position, 1.0);
         }
@@ -124,7 +131,6 @@ extern "C"
         shaderDesc.nextInChain = (const WGPUChainedStruct *)&wgslSrc;
         WGPUShaderModule shaderModule = wgpuDeviceCreateShaderModule(g_device, &shaderDesc);
 
-        // Bind Group Layout
         WGPUBindGroupLayoutEntry bglEntries[2] = {};
         bglEntries[0].binding = 0;
         bglEntries[0].visibility = WGPUShaderStage_Fragment;
@@ -135,12 +141,9 @@ extern "C"
 
         WGPUBindGroupLayoutDescriptor bglDesc = {};
         bglDesc.entryCount = 2;
-        bglEntries[0].buffer.minBindingSize = 16;
-        bglEntries[1].buffer.minBindingSize = 64;
         bglDesc.entries = bglEntries;
         WGPUBindGroupLayout bindGroupLayout = wgpuDeviceCreateBindGroupLayout(g_device, &bglDesc);
 
-        // Bind Group
         WGPUBindGroupEntry bgEntries[2] = {};
         bgEntries[0].binding = 0;
         bgEntries[0].buffer = g_colorBuffer;
@@ -160,7 +163,6 @@ extern "C"
         plDesc.bindGroupLayouts = &bindGroupLayout;
         WGPUPipelineLayout pipelineLayout = wgpuDeviceCreatePipelineLayout(g_device, &plDesc);
 
-        // Pipeline
         WGPURenderPipelineDescriptor pipelineDesc = {};
         pipelineDesc.layout = pipelineLayout;
 
@@ -193,7 +195,7 @@ extern "C"
 
         WGPUDepthStencilState depthStencil = {};
         depthStencil.format = WGPUTextureFormat_Depth24Plus;
-        depthStencil.depthWriteEnabled = WGPUOptionalBool_True; // FIXED
+        depthStencil.depthWriteEnabled = WGPUOptionalBool_True;
         depthStencil.depthCompare = WGPUCompareFunction_Less;
         pipelineDesc.depthStencil = &depthStencil;
 
@@ -202,6 +204,7 @@ extern "C"
         pipelineDesc.multisample.mask = ~0u;
 
         g_pipeline = wgpuDeviceCreateRenderPipeline(g_device, &pipelineDesc);
+        wgpuShaderModuleRelease(shaderModule);
     }
 
     MIST_API void mist_poll_events() { glfwPollEvents(); }
@@ -235,6 +238,9 @@ extern "C"
     {
         WGPUSurfaceTexture surfaceTexture;
         wgpuSurfaceGetCurrentTexture(g_surface, &surfaceTexture);
+        if (surfaceTexture.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal)
+            return;
+
         WGPUTextureView nextTexture = wgpuTextureCreateView(surfaceTexture.texture, nullptr);
         WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(g_device, nullptr);
 
@@ -265,6 +271,7 @@ extern "C"
             wgpuRenderPassEncoderDraw(renderPass, g_vertexCount, 1, 0, 0);
         }
         wgpuRenderPassEncoderEnd(renderPass);
+
         WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(encoder, nullptr);
         wgpuQueueSubmit(g_queue, 1, &cmd);
         wgpuSurfacePresent(g_surface);
@@ -272,33 +279,6 @@ extern "C"
         wgpuCommandBufferRelease(cmd);
         wgpuCommandEncoderRelease(encoder);
         wgpuTextureViewRelease(nextTexture);
-    }
-
-    MIST_API void mist_set_shader(const char *shaderSource)
-    {
-        if (!g_device)
-            return;
-
-        // 1. Compile the new shader module
-        WGPUShaderSourceWGSL wgslSrc = {};
-        wgslSrc.chain.sType = WGPUSType_ShaderSourceWGSL;
-        wgslSrc.code = {shaderSource, strlen(shaderSource)};
-
-        WGPUShaderModuleDescriptor shaderDesc = {};
-        shaderDesc.nextInChain = (const WGPUChainedStruct *)&wgslSrc;
-        WGPUShaderModule shaderModule = wgpuDeviceCreateShaderModule(g_device, &shaderDesc);
-
-        // 2. Rebuild the pipeline with the new shader
-        // (Note: We reuse the existing layouts to keep it fast)
-        WGPURenderPipelineDescriptor pipelineDesc = {};
-        // ... [This part mirrors your existing pipeline setup logic] ...
-
-        // Release old pipeline and swap
-        if (g_pipeline)
-            wgpuRenderPipelineRelease(g_pipeline);
-        g_pipeline = wgpuDeviceCreateRenderPipeline(g_device, &pipelineDesc);
-
-        wgpuShaderModuleRelease(shaderModule);
-        std::cout << "[Mist Native] Shader Updated!" << std::endl;
+        wgpuTextureRelease(surfaceTexture.texture);
     }
 }
