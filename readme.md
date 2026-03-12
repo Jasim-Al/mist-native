@@ -4,6 +4,8 @@ The high-performance C++ core for the Mist Game Engine.
 ## Overview
 Mist-Native is a lightweight wrapper around **WebGPU (wgpu-native)** and **GLFW**. It provides a flat C API designed to be consumed via Foreign Function Interface (FFI), specifically optimized for the **Bun.js** runtime.
 
+cmake --build build --config Debug
+
 ## Core Architecture
 
 
@@ -30,3 +32,27 @@ The core design principle is "Dumb Backend, Smart Frontend." The C++ layer handl
    mkdir build && cd build
    cmake ..
    cmake --build . --config Debug
+
+## Production Build
+
+```bash
+cmake -B build
+cmake --build build --config Release
+```
+
+## Bun Js integration
+
+```js
+
+import { dlopen, FFIType, suffix, ptr } from "bun:ffi";
+
+const lib = dlopen("mist_native.dll", {
+  mist_init_window: { args: [FFIType.i32, FFIType.i32, FFIType.cstring], returns: FFIType.void },
+  mist_set_mesh_color: { args: [FFIType.f32, FFIType.f32, FFIType.f32, FFIType.f32], returns: FFIType.void },
+  mist_swap_buffers: { args: [], returns: FFIType.void }
+});
+
+// Example: Initialize a 720p window
+const title = Buffer.from("Mist Engine\0");
+lib.symbols.mist_init_window(1280, 720, title);
+```
