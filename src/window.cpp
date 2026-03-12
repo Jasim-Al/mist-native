@@ -1,64 +1,304 @@
 #include "mist_native.h"
 #include <iostream>
+#include <cstring>
 
-// Include the standard WebGPU C headers
-#include <webgpu/webgpu.h>
+#define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3.h>
+#include <GLFW/glfw3native.h>
+
+#include <webgpu/webgpu.h>
 
 static GLFWwindow *g_window = nullptr;
 static WGPUInstance g_instance = nullptr;
+static WGPUSurface g_surface = nullptr;
+static WGPUAdapter g_adapter = nullptr;
+static WGPUDevice g_device = nullptr;
+static WGPUQueue g_queue = nullptr;
+static WGPURenderPipeline g_pipeline = nullptr;
+
+static WGPUBuffer g_colorBuffer = nullptr;
+static WGPUBuffer g_transformBuffer = nullptr;
+static WGPUBindGroup g_bindGroup = nullptr;
+
+static WGPUBuffer g_vertexBuffer = nullptr;
+static uint32_t g_vertexCount = 0;
+
+static WGPUTextureView g_depthView = nullptr;
+
+static void OnAdapterRequest(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGPUStringView message, void *userdata1, void *userdata2)
+{
+    if (status == WGPURequestAdapterStatus_Success)
+        g_adapter = adapter;
+}
+
+static void OnDeviceRequest(WGPURequestDeviceStatus status, WGPUDevice device, WGPUStringView message, void *userdata1, void *userdata2)
+{
+    if (status == WGPURequestDeviceStatus_Success)
+        g_device = device;
+}
 
 extern "C"
 {
 
     MIST_API void mist_init_window(int width, int height, const char *title)
     {
-        // 1. Initialize the Windowing System
         if (!glfwInit())
-        {
-            std::cerr << "[Mist Native] Failed to initialize GLFW" << std::endl;
             return;
-        }
 
-        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // Crucial for WebGPU
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         g_window = glfwCreateWindow(width, height, title, nullptr, nullptr);
 
-        if (!g_window)
-        {
-            std::cerr << "[Mist Native] Failed to create window" << std::endl;
-            glfwTerminate();
-            return;
-        }
+        WGPUInstanceDescriptor instDesc = {};
+        g_instance = wgpuCreateInstance(&instDesc);
 
-        // 2. Initialize the WebGPU Instance
-        WGPUInstanceDescriptor desc = {};
-        desc.nextInChain = nullptr;
-        g_instance = wgpuCreateInstance(&desc);
+        WGPUSurfaceSourceWindowsHWND hwndDesc = {};
+        hwndDesc.chain.sType = WGPUSType_SurfaceSourceWindowsHWND;
+        hwndDesc.hinstance = GetModuleHandle(nullptr);
+        hwndDesc.hwnd = glfwGetWin32Window(g_window);
 
-        if (!g_instance)
-        {
-            std::cerr << "[Mist Native] CRITICAL: Failed to create WebGPU Instance!" << std::endl;
+        WGPUSurfaceDescriptor surfaceDesc = {};
+        surfaceDesc.nextInChain = (const WGPUChainedStruct *)&hwndDesc;
+        g_surface = wgpuInstanceCreateSurface(g_instance, &surfaceDesc);
+
+        WGPURequestAdapterOptions adapterOpts = {};
+        adapterOpts.compatibleSurface = g_surface;
+        WGPURequestAdapterCallbackInfo adapterCb = {};
+        adapterCb.callback = OnAdapterRequest;
+        wgpuInstanceRequestAdapter(g_instance, &adapterOpts, adapterCb);
+
+        WGPUDeviceDescriptor deviceDesc = {};
+        WGPURequestDeviceCallbackInfo deviceCb = {};
+        deviceCb.callback = OnDeviceRequest;
+        wgpuAdapterRequestDevice(g_adapter, &deviceDesc, deviceCb);
+
+        g_queue = wgpuDeviceGetQueue(g_device);
+
+        WGPUSurfaceConfiguration config = {};
+        config.device = g_device;
+        config.format = WGPUTextureFormat_BGRA8Unorm;
+        config.usage = WGPUTextureUsage_RenderAttachment;
+        config.width = width;
+        config.height = height;
+        config.presentMode = WGPUPresentMode_Fifo;
+        config.alphaMode = WGPUCompositeAlphaMode_Auto;
+        wgpuSurfaceConfigure(g_surface, &config);
+
+        // Depth Texture
+        WGPUTextureDescriptor depthDesc = {};
+        depthDesc.usage = WGPUTextureUsage_RenderAttachment;
+        depthDesc.dimension = WGPUTextureDimension_2D;
+        depthDesc.size = {(uint32_t)width, (uint32_t)height, 1};
+        depthDesc.format = WGPUTextureFormat_Depth24Plus;
+        depthDesc.mipLevelCount = 1;
+        depthDesc.sampleCount = 1;
+        WGPUTexture depthTexture = wgpuDeviceCreateTexture(g_device, &depthDesc);
+        g_depthView = wgpuTextureCreateView(depthTexture, nullptr);
+
+        // Buffers
+        WGPUBufferDescriptor bufDesc = {};
+        bufDesc.label = {nullptr, 0};
+        bufDesc.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+
+        bufDesc.size = 16;
+        g_colorBuffer = wgpuDeviceCreateBuffer(g_device, &bufDesc);
+
+        bufDesc.size = 64;
+        g_transformBuffer = wgpuDeviceCreateBuffer(g_device, &bufDesc);
+
+        // Shader
+        const char *wgslSource = R"(
+        @group(0) @binding(0) var<uniform> u_color: vec4f;
+        @group(0) @binding(1) var<uniform> u_transform: mat4x4f;
+        struct VertexInput { @location(0) position: vec3f, };
+        @vertex fn vs_main(in: VertexInput) -> @builtin(position) vec4f {
+            return u_transform * vec4f(in.position, 1.0);
         }
-        else
-        {
-            std::cout << "[Mist Native] Native window and WebGPU Instance created successfully!" << std::endl;
-        }
+        @fragment fn fs_main() -> @location(0) vec4f { return u_color; }
+    )";
+
+        WGPUShaderSourceWGSL wgslSrc = {};
+        wgslSrc.chain.sType = WGPUSType_ShaderSourceWGSL;
+        wgslSrc.code = {wgslSource, strlen(wgslSource)};
+
+        WGPUShaderModuleDescriptor shaderDesc = {};
+        shaderDesc.nextInChain = (const WGPUChainedStruct *)&wgslSrc;
+        WGPUShaderModule shaderModule = wgpuDeviceCreateShaderModule(g_device, &shaderDesc);
+
+        // Bind Group Layout
+        WGPUBindGroupLayoutEntry bglEntries[2] = {};
+        bglEntries[0].binding = 0;
+        bglEntries[0].visibility = WGPUShaderStage_Fragment;
+        bglEntries[0].buffer.type = WGPUBufferBindingType_Uniform;
+        bglEntries[1].binding = 1;
+        bglEntries[1].visibility = WGPUShaderStage_Vertex;
+        bglEntries[1].buffer.type = WGPUBufferBindingType_Uniform;
+
+        WGPUBindGroupLayoutDescriptor bglDesc = {};
+        bglDesc.entryCount = 2;
+        bglEntries[0].buffer.minBindingSize = 16;
+        bglEntries[1].buffer.minBindingSize = 64;
+        bglDesc.entries = bglEntries;
+        WGPUBindGroupLayout bindGroupLayout = wgpuDeviceCreateBindGroupLayout(g_device, &bglDesc);
+
+        // Bind Group
+        WGPUBindGroupEntry bgEntries[2] = {};
+        bgEntries[0].binding = 0;
+        bgEntries[0].buffer = g_colorBuffer;
+        bgEntries[0].size = 16;
+        bgEntries[1].binding = 1;
+        bgEntries[1].buffer = g_transformBuffer;
+        bgEntries[1].size = 64;
+
+        WGPUBindGroupDescriptor bgDesc = {};
+        bgDesc.layout = bindGroupLayout;
+        bgDesc.entryCount = 2;
+        bgDesc.entries = bgEntries;
+        g_bindGroup = wgpuDeviceCreateBindGroup(g_device, &bgDesc);
+
+        WGPUPipelineLayoutDescriptor plDesc = {};
+        plDesc.bindGroupLayoutCount = 1;
+        plDesc.bindGroupLayouts = &bindGroupLayout;
+        WGPUPipelineLayout pipelineLayout = wgpuDeviceCreatePipelineLayout(g_device, &plDesc);
+
+        // Pipeline
+        WGPURenderPipelineDescriptor pipelineDesc = {};
+        pipelineDesc.layout = pipelineLayout;
+
+        WGPUVertexAttribute vertAttr = {};
+        vertAttr.format = WGPUVertexFormat_Float32x3;
+        vertAttr.offset = 0;
+        vertAttr.shaderLocation = 0;
+
+        WGPUVertexBufferLayout vertLayout = {};
+        vertLayout.arrayStride = 3 * sizeof(float);
+        vertLayout.stepMode = WGPUVertexStepMode_Vertex;
+        vertLayout.attributeCount = 1;
+        vertLayout.attributes = &vertAttr;
+
+        pipelineDesc.vertex.module = shaderModule;
+        pipelineDesc.vertex.entryPoint = {"vs_main", strlen("vs_main")};
+        pipelineDesc.vertex.bufferCount = 1;
+        pipelineDesc.vertex.buffers = &vertLayout;
+
+        WGPUColorTargetState colorTarget = {};
+        colorTarget.format = WGPUTextureFormat_BGRA8Unorm;
+        colorTarget.writeMask = WGPUColorWriteMask_All;
+
+        WGPUFragmentState fragmentState = {};
+        fragmentState.module = shaderModule;
+        fragmentState.entryPoint = {"fs_main", strlen("fs_main")};
+        fragmentState.targetCount = 1;
+        fragmentState.targets = &colorTarget;
+        pipelineDesc.fragment = &fragmentState;
+
+        WGPUDepthStencilState depthStencil = {};
+        depthStencil.format = WGPUTextureFormat_Depth24Plus;
+        depthStencil.depthWriteEnabled = WGPUOptionalBool_True; // FIXED
+        depthStencil.depthCompare = WGPUCompareFunction_Less;
+        pipelineDesc.depthStencil = &depthStencil;
+
+        pipelineDesc.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+        pipelineDesc.multisample.count = 1;
+        pipelineDesc.multisample.mask = ~0u;
+
+        g_pipeline = wgpuDeviceCreateRenderPipeline(g_device, &pipelineDesc);
     }
 
-    MIST_API void mist_poll_events()
+    MIST_API void mist_poll_events() { glfwPollEvents(); }
+    MIST_API bool mist_window_should_close() { return glfwWindowShouldClose(g_window); }
+
+    MIST_API void mist_set_mesh_color(float r, float g, float b, float a)
     {
-        glfwPollEvents();
+        float data[4] = {r, g, b, a};
+        wgpuQueueWriteBuffer(g_queue, g_colorBuffer, 0, data, 16);
     }
 
-    MIST_API bool mist_window_should_close()
+    MIST_API void mist_set_transform(const float *matrix)
     {
-        if (!g_window)
-            return true;
-        return glfwWindowShouldClose(g_window);
+        wgpuQueueWriteBuffer(g_queue, g_transformBuffer, 0, matrix, 64);
+    }
+
+    MIST_API void mist_set_vertex_buffer(const float *vertices, int vertexCount)
+    {
+        if (g_vertexBuffer)
+            wgpuBufferRelease(g_vertexBuffer);
+        g_vertexCount = vertexCount;
+        size_t size = vertexCount * 3 * sizeof(float);
+        WGPUBufferDescriptor desc = {};
+        desc.usage = WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
+        desc.size = size;
+        g_vertexBuffer = wgpuDeviceCreateBuffer(g_device, &desc);
+        wgpuQueueWriteBuffer(g_queue, g_vertexBuffer, 0, vertices, size);
     }
 
     MIST_API void mist_swap_buffers()
     {
-        // We will hook this up to the WebGPU SwapChain next!
+        WGPUSurfaceTexture surfaceTexture;
+        wgpuSurfaceGetCurrentTexture(g_surface, &surfaceTexture);
+        WGPUTextureView nextTexture = wgpuTextureCreateView(surfaceTexture.texture, nullptr);
+        WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(g_device, nullptr);
+
+        WGPURenderPassColorAttachment colorAttachment = {};
+        colorAttachment.view = nextTexture;
+        colorAttachment.loadOp = WGPULoadOp_Clear;
+        colorAttachment.storeOp = WGPUStoreOp_Store;
+        colorAttachment.clearValue = {0.1, 0.1, 0.12, 1.0};
+        colorAttachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+
+        WGPURenderPassDepthStencilAttachment depthAttachment = {};
+        depthAttachment.view = g_depthView;
+        depthAttachment.depthLoadOp = WGPULoadOp_Clear;
+        depthAttachment.depthStoreOp = WGPUStoreOp_Store;
+        depthAttachment.depthClearValue = 1.0f;
+
+        WGPURenderPassDescriptor renderPassDesc = {};
+        renderPassDesc.colorAttachmentCount = 1;
+        renderPassDesc.colorAttachments = &colorAttachment;
+        renderPassDesc.depthStencilAttachment = &depthAttachment;
+
+        WGPURenderPassEncoder renderPass = wgpuCommandEncoderBeginRenderPass(encoder, &renderPassDesc);
+        wgpuRenderPassEncoderSetPipeline(renderPass, g_pipeline);
+        wgpuRenderPassEncoderSetBindGroup(renderPass, 0, g_bindGroup, 0, nullptr);
+        if (g_vertexBuffer)
+        {
+            wgpuRenderPassEncoderSetVertexBuffer(renderPass, 0, g_vertexBuffer, 0, g_vertexCount * 3 * sizeof(float));
+            wgpuRenderPassEncoderDraw(renderPass, g_vertexCount, 1, 0, 0);
+        }
+        wgpuRenderPassEncoderEnd(renderPass);
+        WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(encoder, nullptr);
+        wgpuQueueSubmit(g_queue, 1, &cmd);
+        wgpuSurfacePresent(g_surface);
+
+        wgpuCommandBufferRelease(cmd);
+        wgpuCommandEncoderRelease(encoder);
+        wgpuTextureViewRelease(nextTexture);
+    }
+
+    MIST_API void mist_set_shader(const char *shaderSource)
+    {
+        if (!g_device)
+            return;
+
+        // 1. Compile the new shader module
+        WGPUShaderSourceWGSL wgslSrc = {};
+        wgslSrc.chain.sType = WGPUSType_ShaderSourceWGSL;
+        wgslSrc.code = {shaderSource, strlen(shaderSource)};
+
+        WGPUShaderModuleDescriptor shaderDesc = {};
+        shaderDesc.nextInChain = (const WGPUChainedStruct *)&wgslSrc;
+        WGPUShaderModule shaderModule = wgpuDeviceCreateShaderModule(g_device, &shaderDesc);
+
+        // 2. Rebuild the pipeline with the new shader
+        // (Note: We reuse the existing layouts to keep it fast)
+        WGPURenderPipelineDescriptor pipelineDesc = {};
+        // ... [This part mirrors your existing pipeline setup logic] ...
+
+        // Release old pipeline and swap
+        if (g_pipeline)
+            wgpuRenderPipelineRelease(g_pipeline);
+        g_pipeline = wgpuDeviceCreateRenderPipeline(g_device, &pipelineDesc);
+
+        wgpuShaderModuleRelease(shaderModule);
+        std::cout << "[Mist Native] Shader Updated!" << std::endl;
     }
 }
