@@ -48,7 +48,7 @@ add_custom_command(TARGET mist_native POST_BUILD
     $<TARGET_FILE_DIR:mist_native>
 )
 
-# # --- Automation: Copy DLLs to Project Root ---
+# --- Automation: Copy DLLs to Project Root ---
 
 # if(WIN32)
 #     # Define the destination (Your Bun Project Root)

@@ -40,6 +40,29 @@ static void OnDeviceRequest(WGPURequestDeviceStatus status, WGPUDevice device, W
 extern "C"
 {
 
+    /*
+    Mist Input
+    */
+
+    MIST_API bool mist_get_key(int key)
+    {
+        if (!g_window)
+            return false;
+        return glfwGetKey(g_window, key) == GLFW_PRESS;
+    }
+
+    MIST_API void mist_get_mouse_pos(double *x, double *y)
+    {
+        if (g_window)
+            glfwGetCursorPos(g_window, x, y);
+    }
+
+    MIST_API void mist_set_input_mode(int mode, int value)
+    {
+        if (g_window)
+            glfwSetInputMode(g_window, mode, value);
+    }
+
     MIST_API void mist_resize_window(int width, int height)
     {
         if (!g_device || !g_surface || width <= 0 || height <= 0)
@@ -94,11 +117,13 @@ extern "C"
         adapterOpts.compatibleSurface = g_surface;
 
         WGPURequestAdapterCallbackInfo adapterCb = {};
+        adapterCb.nextInChain = nullptr;
         adapterCb.callback = OnAdapterRequest;
         wgpuInstanceRequestAdapter(g_instance, &adapterOpts, adapterCb);
 
         WGPUDeviceDescriptor deviceDesc = {};
         WGPURequestDeviceCallbackInfo deviceCb = {};
+        deviceCb.nextInChain = nullptr;
         deviceCb.callback = OnDeviceRequest;
         wgpuAdapterRequestDevice(g_adapter, &deviceDesc, deviceCb);
 
@@ -147,9 +172,11 @@ extern "C"
         WGPUBindGroupEntry bgEntries[2] = {};
         bgEntries[0].binding = 0;
         bgEntries[0].buffer = g_colorBuffer;
+        bgEntries[0].offset = 0;
         bgEntries[0].size = 16;
         bgEntries[1].binding = 1;
         bgEntries[1].buffer = g_transformBuffer;
+        bgEntries[1].offset = 0;
         bgEntries[1].size = 64;
 
         WGPUBindGroupDescriptor bgDesc = {};
@@ -226,7 +253,7 @@ extern "C"
         if (g_vertexBuffer)
             wgpuBufferRelease(g_vertexBuffer);
         g_vertexCount = vertexCount;
-        size_t size = vertexCount * 3 * sizeof(float);
+        size_t size = (size_t)vertexCount * 3 * sizeof(float);
         WGPUBufferDescriptor desc = {};
         desc.usage = WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
         desc.size = size;
@@ -246,10 +273,10 @@ extern "C"
 
         WGPURenderPassColorAttachment colorAttachment = {};
         colorAttachment.view = nextTexture;
+        colorAttachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
         colorAttachment.loadOp = WGPULoadOp_Clear;
         colorAttachment.storeOp = WGPUStoreOp_Store;
         colorAttachment.clearValue = {0.1, 0.1, 0.12, 1.0};
-        colorAttachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
 
         WGPURenderPassDepthStencilAttachment depthAttachment = {};
         depthAttachment.view = g_depthView;
@@ -263,15 +290,17 @@ extern "C"
         renderPassDesc.depthStencilAttachment = &depthAttachment;
 
         WGPURenderPassEncoder renderPass = wgpuCommandEncoderBeginRenderPass(encoder, &renderPassDesc);
+
         wgpuRenderPassEncoderSetPipeline(renderPass, g_pipeline);
         wgpuRenderPassEncoderSetBindGroup(renderPass, 0, g_bindGroup, 0, nullptr);
+
         if (g_vertexBuffer)
         {
-            wgpuRenderPassEncoderSetVertexBuffer(renderPass, 0, g_vertexBuffer, 0, g_vertexCount * 3 * sizeof(float));
+            wgpuRenderPassEncoderSetVertexBuffer(renderPass, 0, g_vertexBuffer, 0, (size_t)g_vertexCount * 3 * sizeof(float));
             wgpuRenderPassEncoderDraw(renderPass, g_vertexCount, 1, 0, 0);
         }
-        wgpuRenderPassEncoderEnd(renderPass);
 
+        wgpuRenderPassEncoderEnd(renderPass);
         WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(encoder, nullptr);
         wgpuQueueSubmit(g_queue, 1, &cmd);
         wgpuSurfacePresent(g_surface);
