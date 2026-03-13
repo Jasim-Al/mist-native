@@ -8,6 +8,7 @@
 
 #include <webgpu/webgpu.h>
 
+// --- Global State ---
 static GLFWwindow *g_window = nullptr;
 static WGPUInstance g_instance = nullptr;
 static WGPUSurface g_surface = nullptr;
@@ -25,6 +26,7 @@ static uint32_t g_vertexCount = 0;
 
 static WGPUTextureView g_depthView = nullptr;
 
+// --- WebGPU Callbacks ---
 static void OnAdapterRequest(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGPUStringView message, void *userdata1, void *userdata2)
 {
     if (status == WGPURequestAdapterStatus_Success)
@@ -37,19 +39,16 @@ static void OnDeviceRequest(WGPURequestDeviceStatus status, WGPUDevice device, W
         g_device = device;
 }
 
+// --- Internal GLFW Resize Callback ---
+void framebuffer_size_callback(GLFWwindow *window, int width, int height)
+{
+    // This allows the C++ side to handle the resize immediately
+    // even if the JS thread is busy.
+    mist_resize_window(width, height);
+}
+
 extern "C"
 {
-
-    /*
-    Mist Input
-    */
-
-    MIST_API bool mist_get_key(int key)
-    {
-        if (!g_window)
-            return false;
-        return glfwGetKey(g_window, key) == GLFW_PRESS;
-    }
 
     MIST_API void mist_get_mouse_pos(double *x, double *y)
     {
@@ -61,6 +60,13 @@ extern "C"
     {
         if (g_window)
             glfwSetInputMode(g_window, mode, value);
+    }
+
+    MIST_API bool mist_get_key(int key)
+    {
+        if (!g_window)
+            return false;
+        return glfwGetKey(g_window, key) == GLFW_PRESS;
     }
 
     MIST_API void mist_resize_window(int width, int height)
@@ -91,6 +97,8 @@ extern "C"
         WGPUTexture depthTexture = wgpuDeviceCreateTexture(g_device, &depthDesc);
         g_depthView = wgpuTextureCreateView(depthTexture, nullptr);
         wgpuTextureRelease(depthTexture);
+
+        std::cout << "[Mist] Internal Resize: " << width << "x" << height << std::endl;
     }
 
     MIST_API void mist_init_window(int width, int height, const char *title)
@@ -100,6 +108,9 @@ extern "C"
 
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         g_window = glfwCreateWindow(width, height, title, nullptr, nullptr);
+
+        // Register the resize callback
+        glfwSetFramebufferSizeCallback(g_window, framebuffer_size_callback);
 
         WGPUInstanceDescriptor instDesc = {};
         g_instance = wgpuCreateInstance(&instDesc);
@@ -117,18 +128,17 @@ extern "C"
         adapterOpts.compatibleSurface = g_surface;
 
         WGPURequestAdapterCallbackInfo adapterCb = {};
-        adapterCb.nextInChain = nullptr;
         adapterCb.callback = OnAdapterRequest;
         wgpuInstanceRequestAdapter(g_instance, &adapterOpts, adapterCb);
 
         WGPUDeviceDescriptor deviceDesc = {};
         WGPURequestDeviceCallbackInfo deviceCb = {};
-        deviceCb.nextInChain = nullptr;
         deviceCb.callback = OnDeviceRequest;
         wgpuAdapterRequestDevice(g_adapter, &deviceDesc, deviceCb);
 
         g_queue = wgpuDeviceGetQueue(g_device);
 
+        // Initial resize call to setup surface and depth buffer
         mist_resize_window(width, height);
 
         WGPUBufferDescriptor bufDesc = {};
@@ -142,8 +152,11 @@ extern "C"
         @group(0) @binding(0) var<uniform> u_color: vec4f;
         @group(0) @binding(1) var<uniform> u_transform: mat4x4f;
         struct VertexInput { @location(0) position: vec3f };
-        @vertex fn vs_main(in: VertexInput) -> @builtin(position) vec4f {
-            return u_transform * vec4f(in.position, 1.0);
+        struct VertexOutput { @builtin(position) clip_pos: vec4f };
+        @vertex fn vs_main(in: VertexInput) -> VertexOutput {
+            var out: VertexOutput;
+            out.clip_pos = u_transform * vec4f(in.position, 1.0);
+            return out;
         }
         @fragment fn fs_main() -> @location(0) vec4f { return u_color; }
     )";
@@ -290,17 +303,15 @@ extern "C"
         renderPassDesc.depthStencilAttachment = &depthAttachment;
 
         WGPURenderPassEncoder renderPass = wgpuCommandEncoderBeginRenderPass(encoder, &renderPassDesc);
-
         wgpuRenderPassEncoderSetPipeline(renderPass, g_pipeline);
         wgpuRenderPassEncoderSetBindGroup(renderPass, 0, g_bindGroup, 0, nullptr);
-
         if (g_vertexBuffer)
         {
             wgpuRenderPassEncoderSetVertexBuffer(renderPass, 0, g_vertexBuffer, 0, (size_t)g_vertexCount * 3 * sizeof(float));
             wgpuRenderPassEncoderDraw(renderPass, g_vertexCount, 1, 0, 0);
         }
-
         wgpuRenderPassEncoderEnd(renderPass);
+
         WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(encoder, nullptr);
         wgpuQueueSubmit(g_queue, 1, &cmd);
         wgpuSurfacePresent(g_surface);
