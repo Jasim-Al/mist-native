@@ -8,7 +8,7 @@
 
 #include <webgpu/webgpu.h>
 
-// --- Global State ---
+// --- Global Engine State ---
 static GLFWwindow *g_window = nullptr;
 static WGPUInstance g_instance = nullptr;
 static WGPUSurface g_surface = nullptr;
@@ -26,7 +26,7 @@ static uint32_t g_vertexCount = 0;
 
 static WGPUTextureView g_depthView = nullptr;
 
-// --- WebGPU Callbacks ---
+// --- WebGPU Internal Callbacks ---
 static void OnAdapterRequest(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGPUStringView message, void *userdata1, void *userdata2)
 {
     if (status == WGPURequestAdapterStatus_Success)
@@ -39,16 +39,16 @@ static void OnDeviceRequest(WGPURequestDeviceStatus status, WGPUDevice device, W
         g_device = device;
 }
 
-// --- Internal GLFW Resize Callback ---
+// --- Internal GLFW Resize Handler ---
 void framebuffer_size_callback(GLFWwindow *window, int width, int height)
 {
-    // This allows the C++ side to handle the resize immediately
-    // even if the JS thread is busy.
     mist_resize_window(width, height);
 }
 
 extern "C"
 {
+
+    // --- Input Functions ---
 
     MIST_API void mist_get_mouse_pos(double *x, double *y)
     {
@@ -69,6 +69,8 @@ extern "C"
         return glfwGetKey(g_window, key) == GLFW_PRESS;
     }
 
+    // --- Window & Surface Management ---
+
     MIST_API void mist_resize_window(int width, int height)
     {
         if (!g_device || !g_surface || width <= 0 || height <= 0)
@@ -80,7 +82,7 @@ extern "C"
         config.usage = WGPUTextureUsage_RenderAttachment;
         config.width = (uint32_t)width;
         config.height = (uint32_t)height;
-        config.presentMode = WGPUPresentMode_Fifo;
+        config.presentMode = WGPUPresentMode_Fifo; // V-Sync enabled for stability
         config.alphaMode = WGPUCompositeAlphaMode_Auto;
         wgpuSurfaceConfigure(g_surface, &config);
 
@@ -97,8 +99,6 @@ extern "C"
         WGPUTexture depthTexture = wgpuDeviceCreateTexture(g_device, &depthDesc);
         g_depthView = wgpuTextureCreateView(depthTexture, nullptr);
         wgpuTextureRelease(depthTexture);
-
-        std::cout << "[Mist] Internal Resize: " << width << "x" << height << std::endl;
     }
 
     MIST_API void mist_init_window(int width, int height, const char *title)
@@ -108,8 +108,6 @@ extern "C"
 
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         g_window = glfwCreateWindow(width, height, title, nullptr, nullptr);
-
-        // Register the resize callback
         glfwSetFramebufferSizeCallback(g_window, framebuffer_size_callback);
 
         WGPUInstanceDescriptor instDesc = {};
@@ -138,7 +136,6 @@ extern "C"
 
         g_queue = wgpuDeviceGetQueue(g_device);
 
-        // Initial resize call to setup surface and depth buffer
         mist_resize_window(width, height);
 
         WGPUBufferDescriptor bufDesc = {};
@@ -152,11 +149,8 @@ extern "C"
         @group(0) @binding(0) var<uniform> u_color: vec4f;
         @group(0) @binding(1) var<uniform> u_transform: mat4x4f;
         struct VertexInput { @location(0) position: vec3f };
-        struct VertexOutput { @builtin(position) clip_pos: vec4f };
-        @vertex fn vs_main(in: VertexInput) -> VertexOutput {
-            var out: VertexOutput;
-            out.clip_pos = u_transform * vec4f(in.position, 1.0);
-            return out;
+        @vertex fn vs_main(in: VertexInput) -> @builtin(position) vec4f {
+            return u_transform * vec4f(in.position, 1.0);
         }
         @fragment fn fs_main() -> @location(0) vec4f { return u_color; }
     )";
@@ -250,6 +244,8 @@ extern "C"
     MIST_API void mist_poll_events() { glfwPollEvents(); }
     MIST_API bool mist_window_should_close() { return glfwWindowShouldClose(g_window); }
 
+    // --- Graphics Setters ---
+
     MIST_API void mist_set_mesh_color(float r, float g, float b, float a)
     {
         float data[4] = {r, g, b, a};
@@ -274,7 +270,9 @@ extern "C"
         wgpuQueueWriteBuffer(g_queue, g_vertexBuffer, 0, vertices, size);
     }
 
-    MIST_API void mist_swap_buffers()
+    // --- Frame Presentation ---
+
+    MIST_API void mist_swap_buffers(float r, float g, float b, float a)
     {
         WGPUSurfaceTexture surfaceTexture;
         wgpuSurfaceGetCurrentTexture(g_surface, &surfaceTexture);
@@ -289,7 +287,8 @@ extern "C"
         colorAttachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
         colorAttachment.loadOp = WGPULoadOp_Clear;
         colorAttachment.storeOp = WGPUStoreOp_Store;
-        colorAttachment.clearValue = {0.1, 0.1, 0.12, 1.0};
+        // Dynamic Skybox color from Skybox.mx
+        colorAttachment.clearValue = {(double)r, (double)g, (double)b, (double)a};
 
         WGPURenderPassDepthStencilAttachment depthAttachment = {};
         depthAttachment.view = g_depthView;
